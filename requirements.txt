@@ -1,0 +1,7 @@
+torch~=2.0.1
+matplotlib~=3.6.2
+numpy~=1.23.4
+tqdm~=4.64.1
+pathlib~=1.0.1
+pandas~=2.0.0
+torchtext~=0.15.2

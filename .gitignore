@@ -1,0 +1,8 @@
+ner/
+pos/
+good_output/
+vocab.txt
+wordVectors.txt
+ass2.pdf
+.idea/
+checkpoints/

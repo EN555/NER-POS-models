@@ -13,7 +13,7 @@ we relate to words in the train set as parameters and we save them for the test 
 we too add on the tagger3 the 3 characters of the suffix and prefix of each of the word in the train set, and we train the model.
 
 ## tagger5:
-we implemented much more sophisticated network, which relate to each word in two stage, character level and word level, in the 
+we implemented much more sophisticated network we take the concept from the paper "End-to-end Sequence Labeling via Bi-directional LSTM-CNNs-CRF"], which relate to each word in two stage, character level and word level, in the 
 character level we add to the vocab all the characters in the english language, and run conv1d layer on this sequence of embedding,
 then we run max poling and concat all with the word embedding, then we feed it to fuclly connected layer.
 

@@ -14,34 +14,10 @@ import torch.utils.data as data
 from typing import List
 import re
 
+MAX_WORD_LEN = 20
+WINDOW_SIZE = 3
+EMBEDDING_DIM = 50
 
-def extract_windows(data: List, test: bool):
-    cleaned_list = [string.replace("\n", "") for string in data]
-    sentence, sentences = [], []
-    for idx, word in enumerate(cleaned_list):
-        if word == "":
-            sentences.append(sentence)
-            sentence = []
-        else:
-            sentence.append(word)
-    triplets = []
-    for idx, sentence in enumerate(sentences):
-        sentence = np.insert(sentence, 0, ['start1', 'start2'])
-        sentence = np.append(sentence, ['end1', 'end2'])
-        for idx_word in range(len(sentence) - 4):
-            if test:
-                triplets.append([word for word in sentence[idx_word: idx_word + 5]])
-            else:
-                triplets.append(([word.split(" ")[0] for word in sentence[idx_word: idx_word + 5]],
-                                 sentence[idx_word + 2].split(" ")[1]))
-    return triplets
-
-
-datetime_regex = re.compile(
-    r'\b(\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|\d{2,4}[./-]\d{1,2}[./-]\d{1,2}|\d{1,2}[./-]\w{3,}|[012]?\d:[0-5]\d(:[0-5]\d)?(\.\d+)?\b)')
-url_regex = re.compile(r'https?://(?:[-\w]+\.)?[-\w]+(?:\.\w+)+[-\w/_\?&=%#]*')
-phone_regex = re.compile(r'\b(\+?\d{1,3}[- ]?)?\(?\d{3}\)?[- ]?\d{3}[- ]?\d{4}\b')
-surrounding_special_chars = '!@#$%^&*()_-+={}[]|\:;"<>,.?/~` '
 patterns = [
     (r'.*ing$', 'VBG'),  # gerunds
     (r'.*(ed|en)$', 'VBD'),  # simple past
@@ -53,7 +29,33 @@ patterns = [
 ]
 
 
-def pos_tag(first, word):
+def extract_windows(data_lines: List, test: bool):
+    cleaned_list = [string.replace("\n", "") for string in data_lines]
+    sentence, sentences = [], []
+    for idx, word in enumerate(cleaned_list):
+        if word == "":
+            sentences.append(sentence)
+            sentence = []
+        else:
+            sentence.append(word)
+    windows = []
+    for idx, sentence in enumerate(sentences):
+        sentence = np.insert(sentence, 0, [f'start{i + 1}' for i in range(WINDOW_SIZE // 2)])
+        sentence = np.append(sentence, [f'end{i + 1}' for i in range(WINDOW_SIZE // 2)])
+        for idx_word in range(len(sentence) - WINDOW_SIZE - 1):
+            if test:
+                windows.append([word for word in sentence[idx_word: idx_word + WINDOW_SIZE]])
+            else:
+                windows.append(
+                    (
+                        [word.split(" ")[0] for word in sentence[idx_word: idx_word + WINDOW_SIZE]],
+                        sentence[idx_word + WINDOW_SIZE // 2].split(" ")[1]
+                    )
+                )
+    return windows
+
+
+def get_word(first, word: str):
     for pattern in patterns:
         if pattern[1] == 'NNP' or pattern[1] == 'NNPS':
             if not first and re.match(pattern[0], word):
@@ -63,22 +65,15 @@ def pos_tag(first, word):
     return "<UNK>"
 
 
-def get_word(first, word: str):
-    return pos_tag(first, word)
-
-
-MAX_WORD_LEN = 20
-
-
 class SimpleMLP(nn.Module):
-    def __init__(self, vocab_size, embedding_dim, hidden_dim, num_labels):
+    def __init__(self, vocab_size, hidden_dim, num_labels):
         super().__init__()
-        self.word_embeddings = nn.Embedding(vocab_size, embedding_dim)
-        conv_out = 30
-        self.linear1 = nn.Linear(embedding_dim * 5 + conv_out, hidden_dim)
+        self.word_embeddings = nn.Embedding(vocab_size, EMBEDDING_DIM)
+        conv_out = 100
+        self.linear1 = nn.Linear(EMBEDDING_DIM * WINDOW_SIZE + conv_out, hidden_dim)
         self.dropout = nn.Dropout(0.5)
         self.linear2 = nn.Linear(hidden_dim, num_labels)
-        self.conv = nn.Conv1d(in_channels=950, out_channels=conv_out, kernel_size=3, stride=1)
+        self.conv = nn.Conv1d(in_channels=(MAX_WORD_LEN-1)*EMBEDDING_DIM, out_channels=conv_out, kernel_size=3, stride=1, padding=1)
         self.max_pool = nn.MaxPool1d(kernel_size=3, stride=2)
         self.conv_activation = nn.ReLU()
 
@@ -194,7 +189,6 @@ def create_graphs(path: str, ls: List, epochs: int, type: str):
 
 def train_pos(path):
     epochs = 50
-    embedding_dim = 50
     hidden_dim = 50
     batch_size = 400
     train, dev, test = preprocess(f"{path}/train", f"{path}/dev", f"{path}/test")
@@ -204,7 +198,7 @@ def train_pos(path):
     dev_dataset = InitDataset(dev, vocab, label_vocab)
     train_dataloader = DataLoader(train_dataset, batch_size, shuffle=True, drop_last=True)
     dev_dataloader = DataLoader(dev_dataset, batch_size, shuffle=True, drop_last=True)
-    model = SimpleMLP(len(vocab), embedding_dim, hidden_dim, len(label_vocab))
+    model = SimpleMLP(len(vocab), hidden_dim, len(label_vocab))
     model.eval()
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-5)
@@ -247,13 +241,13 @@ def train_pos(path):
             f"Train: {train_running_loss / len(train_dataloader)} and The acc is: {train_acc / (batch_size * len(train_dataloader))}")
         print(
             f"Dev : {dev_running_loss / len(dev_dataloader)} and The acc is: {dev_acc / (batch_size * len(dev_dataloader))}")
-    torch.save(model.state_dict(), "models/ass1/ner/checkpoint-1")
+    torch.save(model, "checkpoints/pos-final")
 
 
-def predict_test(path_weights, test_dataset, embedding_dim, hidden_dim, label_vocab, vocab):
+def predict_test(path_weights, test_dataset, hidden_dim, label_vocab, vocab):
     test_dataset_ = InitDataset(test_dataset, vocab, label_vocab, True)
     test_dataloader = DataLoader(test_dataset_, batch_size=1, shuffle=False, drop_last=True)
-    model = SimpleMLP(len(vocab), embedding_dim, hidden_dim, len(label_vocab))
+    model = SimpleMLP(len(vocab), hidden_dim, len(label_vocab))
     model.load_state_dict(torch.load(path_weights))
     model.eval()
     test = iter(open("pos/test").readlines())

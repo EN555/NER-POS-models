@@ -13,8 +13,9 @@ from torch.utils.data import DataLoader
 import torch.utils.data as data
 from typing import List
 import re
+from sklearn.utils.class_weight import compute_class_weight
 
-MAX_WORD_LEN = 20
+MAX_WORD_LEN = 11
 
 patterns = [
     (r'.*ing$', 'VBG'),  # gerunds
@@ -26,12 +27,16 @@ patterns = [
     (r'^[A-Z][a-z]*s$', 'NNPS')
 ]
 
+
 def build_word_vocab_characters():
     chars = list("""abcdefghijklmnopqrstuvwxyz0123456789,;.!?:'\"/\\|_@#$%^&*~`+-=<>()[]{}""")
     vocab = build_vocab_from_iterator(iter(chars), specials= ["<UNK>", "padding"])
     vocab.set_default_index(vocab['<UNK>'])  # when there have no token like this
     return vocab
+
+
 vocab_character = build_word_vocab_characters()
+
 
 def extract_windows(data_lines: List, test: bool):
     cleaned_list = [string.replace("\n", "") for string in data_lines]
@@ -52,19 +57,23 @@ def extract_windows(data_lines: List, test: bool):
             else:
                 windows.append(
                     (
-                        [word.split(" ")[0] for word in sentence[idx_word: idx_word + 5]],
-                        sentence[idx_word + 5 // 2].split(" ")[1]
+                        [word.split()[0] for word in sentence[idx_word: idx_word + 5]],
+                        sentence[idx_word + 5 // 2].split()[1]
                     )
                 )
     return windows
 
 
-def create_vocab_from_all(train_data):
+def create_vocab_from_all(train_data, mode: str):
     torch.manual_seed(123)
+    if mode == "pos":
+        specials = ['ADJ', 'CD', 'VBD', 'VBZ', 'MD', 'NNS', 'NNP', 'NNPS', 'VBG', "<UNK>", "<DATE>", "<URL>", "PHONE"]
+    else:
+        specials = ["<UNK>", "<DIS>"]
     with open("vocab.txt", "r") as file:
         vocab_words = [word.replace("\n", "") for word in file.readlines()]
     vectors = np.loadtxt("wordVectors.txt")
-    vocab = build_vocab_from_iterator([vocab_words] + list(yield_tokens(train_data)),specials=['ADJ', 'CD', 'VBD', 'VBZ', 'MD', 'NNS', 'NNP', 'NNPS', 'VBG', "<UNK>","<DATE>", "<URL>", "PHONE"])
+    vocab = build_vocab_from_iterator([vocab_words] + list(yield_tokens(train_data)), specials=specials)
     vocab.set_default_index(vocab['<UNK>'])  # when there have no token like this
     weight_tensor = torch.normal(mean=0.5, std=0.5, size=(len(vocab), 50))
     for idx, word in enumerate(vocab_words):
@@ -73,78 +82,83 @@ def create_vocab_from_all(train_data):
     return vocab, weight_tensor
 
 
-def get_word(first, word: str):
-    for pattern in patterns:
-        if pattern[1] == 'NNP' or pattern[1] == 'NNPS':
-            if not first and re.match(pattern[0], word):
-                return pattern[1]
-        elif re.match(pattern[0], word):
-            return pattern[1]
-    return "<UNK>"
-
-
 class SimpleMLP(nn.Module):
     def __init__(self, weight_tensor, hidden_dim, num_labels):
         super().__init__()
         self.word_embeddings = nn.Embedding.from_pretrained(weight_tensor, freeze=False)
-        nn.init.uniform_(self.word_embeddings.weight, -np.sqrt(3/50), np.sqrt(3/50))
+        nn.init.uniform_(self.word_embeddings.weight, -np.sqrt(3 / 50), np.sqrt(3 / 50))
         self.character_embeddings = nn.Embedding(len(vocab_character), 30)
-        nn.init.uniform_(self.character_embeddings.weight, -np.sqrt(3/30), np.sqrt(3/30))
-        zero_vector = torch.zeros(30, requires_grad=False)
-        self.character_embeddings.weight.data[vocab_character["padding"]] = zero_vector
-        conv_out = 30
-        self.linear1 = nn.Linear(250 + conv_out, hidden_dim)
+        self.character_embeddings.weight.data[vocab_character["padding"]] = torch.zeros(30, requires_grad=False)
+        nn.init.uniform_(self.character_embeddings.weight, -np.sqrt(3 / 30), np.sqrt(3 / 30))
+        self.linear1 = nn.Linear((30 + 50) * 5, hidden_dim)
         self.dropout = nn.Dropout(0.5)
         self.linear2 = nn.Linear(hidden_dim, num_labels)
-        self.conv = nn.Conv1d(in_channels=(MAX_WORD_LEN-1)*30, out_channels=conv_out, kernel_size=3, stride=1, padding=2)
-        self.max_pool = nn.MaxPool1d(kernel_size=3, stride=2)
+        self.conv = nn.Conv1d(in_channels=30, out_channels=30, kernel_size=3, stride=1, padding=1)
+        self.max_pool = nn.MaxPool1d(kernel_size=10, stride=1)
         self.conv_activation = nn.ReLU()
 
     def forward(self, x):
         word_embeddings = self.word_embeddings(x[:, :, 0])
         char_embeddings = self.character_embeddings(x[:, :, 1:])
-        print(char_embeddings.shape)
-        char_embeddings = char_embeddings.reshape(
-            char_embeddings.shape[0],
-            char_embeddings.shape[1],
-            char_embeddings.shape[2] * char_embeddings.shape[3]
-        )
-        print(char_embeddings.shape)
-
+        word_embeddings = word_embeddings.view(-1, word_embeddings.shape[2])
+        char_embeddings = char_embeddings.view(-1, char_embeddings.shape[2], char_embeddings.shape[3])
         char_embeddings = char_embeddings.transpose(1, 2)
-        print(char_embeddings.shape)
+        char_embeddings = self.dropout(char_embeddings)
         char_embeddings = self.conv_activation(self.max_pool(self.conv(char_embeddings)))
-        print(char_embeddings.shape)
-        word_embeddings = word_embeddings.view(word_embeddings.size(0), -1)
-        char_embeddings = torch.squeeze(char_embeddings)
+        char_embeddings = char_embeddings.squeeze(2)
         embeddings = torch.cat([word_embeddings, char_embeddings], dim=1)
-        print(embeddings.shape)
+        embeddings = embeddings.view(x.shape[0], -1)
         tanh_out = self.dropout(torch.tanh(self.linear1(embeddings)))
         return F.softmax(self.linear2(tanh_out), dim=1)
 
 
 class InitDataset(data.Dataset):
-    def __init__(self, data_windows, vocab, label, test: bool = False):
+    def __init__(self, data_windows, vocab, label, test: bool = False, task_name: str = "pos"):
         self.data = data_windows
-        self.tokenizer = lambda x: x.split(" ")
         self.vocab = vocab
         self.label = label
         self.test = test
+        self.task_name = task_name
 
     def __len__(self):
         return len(self.data)
 
-    def __getitem__(self, idx):
+    @staticmethod
+    def _get_word_pos(first, word: str):
+        for pattern in patterns:
+            if pattern[1] == 'NNP' or pattern[1] == 'NNPS':
+                if not first and re.match(pattern[0], word):
+                    return pattern[1]
+            elif re.match(pattern[0], word):
+                return pattern[1]
+        return "<UNK>"
+
+    def get_word_ner(self, idx, window_index, word):
         start2_token = self.vocab["start2"]
         first = self.vocab[self.data[idx][1]] == start2_token
+        if not first and window_index == 2 and not self.data[idx][0][2][0].isupper():
+            return self.vocab["<DIS>"]
+        return self.vocab[word.lower()]
+
+    def get_word_pos(self, idx, word):
+        start2_token = self.vocab["start2"]
+        first = self.vocab[self.data[idx][1]] == start2_token
+        idx_get_word = self._get_word_pos(first, word)
+        if idx_get_word != '<UNK>':
+            word_index = self.vocab[idx_get_word]
+        else:
+            word_index = self.vocab[word.lower()]
+        return word_index
+
+    def get_word(self, idx, window_index, word):
+        if self.task_name == "pos":
+            return self.get_word_pos(idx, word)
+        return self.get_word_ner(idx, window_index, word)
+
+    def __getitem__(self, idx):
         window_indexes = []
-        for word in self.data[idx][0]:
-            idx_get_word = get_word(first, word)
-            if idx_get_word != '<UNK>':
-                word_index = self.vocab[idx_get_word]
-            else:
-                word_index = self.vocab[word.lower()]
-            curr_indcies = [word_index]
+        for window_index, word in enumerate(self.data[idx][0]):
+            curr_indcies = [self.get_word(idx, window_index, word)]
             for char in word:
                 curr_indcies.append(vocab_character[char.lower()])
             if len(curr_indcies) > MAX_WORD_LEN:
@@ -152,9 +166,6 @@ class InitDataset(data.Dataset):
             else:
                 n = len(curr_indcies)
                 for _ in range(MAX_WORD_LEN - n):
-                    ###################
-                    # might need to add here zero padding using speical zero character
-                    ###################
                     curr_indcies.append(vocab_character["padding"])
             window_indexes.append(curr_indcies)
         text = torch.tensor(window_indexes)
@@ -168,13 +179,6 @@ def preprocess(path_train: str, path_dev: str, path_test: str):
     VALIDATION = extract_windows(open(path_dev, 'r').readlines(), False)
     TEST = extract_windows(open(path_test, 'r').readlines(), True)
     return TRAIN, VALIDATION, TEST
-
-
-# def preprocess_ner(path_train: str, path_dev: str, path_test: str):
-#     TRAIN = extract_windows(open(path_train, 'r').readlines(), False)
-#     VALIDATION = extract_windows(open(path_dev, 'r').readlines(), False)
-#     TEST = extract_windows(open(path_test, 'r').readlines(), True)
-#     return TRAIN, VALIDATION, TEST
 
 
 def yield_tokens(data_iter):
@@ -202,8 +206,8 @@ def build_label_vocab(train_datapipe):
     return vocab
 
 
-def create_graphs(path: str, ls: List, epochs: int, type: str):
-    if type == "loss":
+def create_graphs(path: str, ls: List, epochs: int, type_g: str, task_name):
+    if type_g == "loss":
         epochs = list(np.arange(0, epochs + 1, 1))
         new_ = copy.copy(ls)
     else:
@@ -212,28 +216,59 @@ def create_graphs(path: str, ls: List, epochs: int, type: str):
         new_.insert(0, 0)
     plt.plot(epochs, new_)
     plt.xlabel('Number of Iteration')
-    if type == "loss":
+    if type_g == "loss":
         plt.ylabel('Loss')
     else:
         plt.ylabel("Accuracy")
+    plt.title(f"{task_name} Task")
     plt.savefig(path)
     plt.clf()
 
 
-def train_pos(path):
+def ner_acc(predictions, label_vocab, labels):
+    dev_examples = 0
+    dev_acc = 0
+    for idx, pred in enumerate(predictions):
+        if not (label_vocab.lookup_token(pred.item()) == 'O' and labels[idx] == pred.item()):
+            dev_examples += 1
+            if labels[idx] == pred.item():
+                dev_acc += 1
+    return dev_acc, dev_examples
+
+
+def pos_acc(predictions, labels):
+    return (predictions == labels).sum().item(), predictions.shape[0]
+
+
+def data_weights(data, vocab):
+    kp = []
+    for text, label in data:
+        kp.append(vocab.vocab[label])
+    return kp
+
+
+def train_model(task_name):
     epochs = 50
     hidden_dim = 50
     batch_size = 400
-    train, dev, test = preprocess(f"{path}/train", f"{path}/dev", f"{path}/test")
-    vocab, weight_tensor = create_vocab_from_all(train)
+    train, dev, test = preprocess(f"{task_name}/train", f"{task_name}/dev", f"{task_name}/test")
+    vocab, weight_tensor = create_vocab_from_all(train, task_name)
     label_vocab = build_label_vocab(train)
-    train_dataset = InitDataset(train, vocab, label_vocab)
-    dev_dataset = InitDataset(dev, vocab, label_vocab)
+    train_dataset = InitDataset(train, vocab, label_vocab, task_name=task_name)
+    dev_dataset = InitDataset(dev, vocab, label_vocab, task_name=task_name)
+    test_dataset = InitDataset(test, vocab, label_vocab, task_name=task_name)
     train_dataloader = DataLoader(train_dataset, batch_size, shuffle=True, drop_last=True)
     dev_dataloader = DataLoader(dev_dataset, batch_size, shuffle=True, drop_last=True)
+    test_dataloader = DataLoader(test_dataset, 1, shuffle=False)
     model = SimpleMLP(weight_tensor, hidden_dim, len(label_vocab))
     model.eval()
-    criterion = nn.CrossEntropyLoss()
+    all_labels = data_weights(train,label_vocab)
+    class_weights = compute_class_weight(
+        class_weight="balanced",
+        classes=np.unique(all_labels),
+        y=all_labels
+    )
+    criterion = nn.CrossEntropyLoss(weight=torch.tensor(class_weights,dtype=torch.float))
     optimizer = optim.Adam(model.parameters(), lr=0.01, weight_decay=1e-5)
     scheduler = ReduceLROnPlateau(optimizer, mode='max', factor=0.1, patience=3, verbose=True)
     dev_acc_all = []
@@ -242,49 +277,62 @@ def train_pos(path):
         train_running_loss = 0
         dev_running_loss = 0
         train_acc, dev_acc = 0, 0
+        train_examples, dev_examples = 0, 0
         print("###########start train##########")
         for batch in train_dataloader:
             instances, labels = batch
             optimizer.zero_grad()
             output = model(instances)
             predictions = torch.argmax(output, dim=1)
-            train_acc += (predictions == labels).sum().item()
+            if task_name == "pos":
+                curr_train_acc, curr_train_examples = pos_acc(predictions, labels)
+            else:
+                curr_train_acc, curr_train_examples = ner_acc(predictions, label_vocab, labels)
+            train_acc += curr_train_acc
+            train_examples += curr_train_examples
             loss = criterion(output, labels)
             loss.backward()
             optimizer.step()
             train_running_loss += loss.item()
-        scheduler.step(dev_acc / (batch_size * len(dev_dataloader)))
         print("########start dev##########")
         for i, batch in enumerate(dev_dataloader):
             instances, labels = batch
             optimizer.zero_grad()
             output = model(instances)
             predictions = torch.argmax(output, dim=1)
-            dev_acc += (predictions == labels).sum().item()
+            if task_name == "pos":
+                curr_dev_acc, curr_dev_examples = pos_acc(predictions, labels)
+            else:
+                curr_dev_acc, curr_dev_examples = ner_acc(predictions, label_vocab, labels)
+            dev_acc += curr_dev_acc
+            dev_examples += curr_dev_examples
             loss = criterion(output, labels)
             dev_running_loss += loss.item()
-        dev_acc_all.append(dev_acc / (batch_size * len(dev_dataloader)))
+        dev_acc_all.append(dev_acc / dev_examples)
         loss_acc_all.append(dev_running_loss / len(dev_dataloader))
+        scheduler.step(dev_acc / dev_examples)
         if epoch % 5 == 0:
-            torch.save(model, f"checkpoints/pos-{epoch // 5}")
-            create_graphs(f"pos_plot-loss-{epoch // 5}", loss_acc_all, epoch, "loss")
-            create_graphs(f"pos_plot-acc-{epoch // 5}", dev_acc_all, epoch, "acc")
+            torch.save(model, f"checkpoints/{task_name}/{epoch // 5}")
+            create_graphs(f"checkpoints/{task_name}/plot-loss-{epoch // 5}", loss_acc_all, epoch, "loss", task_name)
+            create_graphs(f"checkpoints/{task_name}/plot-acc-{epoch // 5}", dev_acc_all, epoch, "acc", task_name)
         print(f"epoch loss number {epoch}\n")
         print(
-            f"Train: {train_running_loss / len(train_dataloader)} and The acc is: {train_acc / (batch_size * len(train_dataloader))}")
+            f"Train: {train_running_loss / len(train_dataloader)} and The acc is: {train_acc / train_examples}")
         print(
-            f"Dev : {dev_running_loss / len(dev_dataloader)} and The acc is: {dev_acc / (batch_size * len(dev_dataloader))}")
-    torch.save(model, "checkpoints/pos-final")
+            f"Dev : {dev_running_loss / len(dev_dataloader)} and The acc is: {dev_acc / dev_examples}")
+    torch.save(model, f"checkpoints/{task_name}/final")
+    predict_test(model, test_dataloader, label_vocab, vocab, task_name)
 
 
-def predict_test(path_weights, test_dataset, hidden_dim, label_vocab, vocab, weight_tensor):
-    test_dataset_ = InitDataset(test_dataset, vocab, label_vocab, True)
-    test_dataloader = DataLoader(test_dataset_, batch_size=1, shuffle=False, drop_last=True)
+def load_model(path_weights, hidden_dim, weight_tensor, label_vocab):
     model = SimpleMLP(weight_tensor, hidden_dim, len(label_vocab))
     model.load_state_dict(torch.load(path_weights))
     model.eval()
-    test = iter(open("pos/test").readlines())
-    f = open('test1.pos', 'w')
+
+
+def predict_test(model, test_dataloader, label_vocab, vocab, task_name: str):
+    test = iter(open(f"{task_name}/test").readlines())
+    f = open(f'test1.{task_name}', 'w')
     for i, sample in enumerate(test_dataloader):
         output = model(sample)
         predictions = torch.argmax(output, dim=1)
@@ -297,4 +345,4 @@ def predict_test(path_weights, test_dataset, hidden_dim, label_vocab, vocab, wei
 
 if __name__ == "__main__":
     torch.manual_seed(1234)
-    train_pos("pos")
+    train_model("ner")

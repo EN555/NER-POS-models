@@ -50,7 +50,6 @@ class InitDatasetNER(data.Dataset):
 
     def __getitem__(self, idx):
         if self.test:
-            unk_token = self.vocab['<UNK>']
             reg_word = self.vocab["<DIS>"]
             text = [self.vocab[word.lower()] for word in self.data[idx]]
             if not self.data[idx][2][0].isupper():
@@ -58,7 +57,6 @@ class InitDatasetNER(data.Dataset):
             text = torch.tensor(text)
             text = text.view(-1)  # set shape to (seq_len,)
             return text
-        unk_token = self.vocab['<UNK>']
         reg_word = self.vocab["<DIS>"]
         text = [self.vocab[word.lower()] for word in self.data[idx][0]]
         if not self.data[idx][0][2][0].isupper():

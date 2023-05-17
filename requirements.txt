@@ -5,3 +5,4 @@ tqdm~=4.64.1
 pathlib~=1.0.1
 pandas~=2.0.0
 torchtext~=0.15.2
+scikit-learn~=1.2.2

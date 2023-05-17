@@ -1,15 +1,17 @@
 from collections import Counter, OrderedDict
-from typing import List, Iterable
+from typing import List, Iterable, Optional
 
 
-def build_vocab_from_iterator(iterator: Iterable, max_tokens: int, specials: List[str]):
+def build_vocab_from_iterator(iterator: Iterable, max_tokens: Optional[int] = None, min_freq: Optional[int] = 1, specials: List[str] = None):
+    if specials is None:
+        specials = []
     vocab_counter = Counter(iterator)
     vocab_counter = sorted(vocab_counter.items(), key=lambda x: (-x[1], x[0]))
-    if max_tokens is None:
-        vocab = OrderedDict(vocab_counter)
-    else:
-        vocab = OrderedDict(vocab_counter[: max_tokens - len(specials)])
-    return Vocab(list(vocab.values()) + specials)
+    if max_tokens:
+        vocab_counter = vocab_counter[: max_tokens - len(specials)]
+    vocab = OrderedDict(vocab_counter)
+    words = [word for word, count in vocab.items() if count > min_freq]
+    return Vocab(words + specials)
 
 
 class Vocab:

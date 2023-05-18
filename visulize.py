@@ -44,6 +44,9 @@ def main():
                 curr_triple += char_token
             original_word = " "+curr_triple.replace("padding", " ")+" "
             windows = [original_word[i:i + 3] for i, _ in enumerate(original_word[:-2])]
+            if len(windows) != 10:
+                print(f"error in windows len: {original_word} to {len(windows)}, {windows}")
+                continue
             for filter_idx in range(30):
                 max_triple_idx = torch.argmax(activation["conv"][word_idx, filter_idx]).item()
                 argmax_by_label_and_triple[label_output][windows[max_triple_idx]] += 1
